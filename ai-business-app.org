@@ -1,0 +1,876 @@
+### -*- mode: org; eval: (auto-fill-mode 1); eval: (org-beamer-mode 1); eval: (flyspell-mode 1); org-todo-keyword-faces: (("FIGURE" . "orange") ("TABLE" . "orange")) -*-
+#+LATEX_HEADER: \textheight 230mm \textwidth 165mm \topmargin -15mm
+#+LATEX_HEADER: \parindent 0mm
+#+LATEX_HEADER: \evensidemargin 0mm
+#+LATEX_HEADER: \oddsidemargin 0mm
+#+LATEX_HEADER: \parskip 0mm
+#+OPTIONS: toc:nil num:3
+#+SEQ_TODO:   TODO(t) INPROGRESS(i) ALWAYS | DONE LATER PAPER(p) APPENDIX(a)
+
+
+### Babel settings
+#+PROPERTY: header-args:R :session *R-bdma*
+#+PROPERTY: header-args :cache no :results output :exports results :tangle yes :eval never-export
+
+
+* Shiny App
+
+** Test
+#+begin_src R
+dd <- generate.data(
+                    p.treated = 0.5,
+                    disc.power.group.a = 0.6,
+                    disc.power.group.b = 0.3)
+ss <- uplift.metrics(dd)
+ggplot(dd) +
+  geom_histogram(aes(score, fill=factor(outcome)),
+                 alpha = 0.5, position = "identity", bins = 50)
+#+end_src
+
+#+RESULTS:
+
+** Global
+
+#+BEGIN_SRC R :results none :tangle ./shiny/ai-business/global.R
+library(data.table)
+library(ggplot2)
+library(shiny)
+library(shinyWidgets)
+library(plotly)
+library(lubridate)
+library(MASS)
+
+min_max_norm <- function(x, range = c(0,1)) {
+    (x - min(x)) / (max(x) - min(x)) * (max(range) - min(range)) + min(range)
+  }
+
+generate.data <- function(n.obs = 10000,
+                          p.group.b = 0.5,
+                          p.treated = 0.5,
+                          p.outcome.group.a = 0.7,
+                          p.outcome.group.b = 0.2,
+                          disc.power.group.a = 0.5,
+                          disc.power.group.b = 0.5,
+                          ate.group.a = 1,
+                          ate.group.b = 0,
+                          disc.power.uplift = 0.5,
+                          corr.uplift.outcome = 0
+                         ) {
+
+    # RB: TODO: Consider being able to control the variance of the uplift
+    dt.errors <- data.table(mvrnorm(n.obs, mu=c(0,0),
+                                    Sigma = matrix(c(1, corr.uplift.outcome,
+                                                     corr.uplift.outcome, 1), ncol=2)))
+    setnames(dt.errors, names(dt.errors), c("propensity_control", "uplift"))
+    dt.data <- data.table(group_a = as.integer(runif(n.obs) >= p.group.b),
+                          treated = as.integer(runif(n.obs) < p.treated))
+    dt.data <- cbind(dt.data, round(dt.errors, 3))
+    dt.data[, group := ifelse(group_a, "A", "B")]
+
+    dt.data <- dt.data[order(-propensity_control)]
+    dt.data[, propensity_control_quantile_by_group := (1:.N)/.N, by = group]
+    dt.data[group_a == TRUE,  outcome_control := as.integer(propensity_control_quantile_by_group <=
+                                                             p.outcome.group.a - ate.group.a * p.treated)]
+    dt.data[group_a == FALSE, outcome_control := as.integer(propensity_control_quantile_by_group <=
+                                                             p.outcome.group.b - ate.group.a * p.treated)]
+
+    dt.data[, propensity_treated := propensity_control + uplift]
+    dt.data <- dt.data[order(-propensity_treated)]
+    dt.data[, propensity_treated_quantile_by_group := (1:.N)/.N, by = group]
+    dt.data[group_a == TRUE,  outcome_treated := as.integer(propensity_treated_quantile_by_group <=
+                                                            p.outcome.group.a + ate.group.a * (1 - p.treated))]
+    dt.data[group_a == FALSE, outcome_treated := as.integer(propensity_treated_quantile_by_group <=
+                                                            p.outcome.group.b + ate.group.a * (1 - p.treated))]
+
+    dt.data[, propensity := propensity_control + treated * uplift]
+    dt.data <- dt.data[order(-propensity)]
+    dt.data[, propensity_quantile_by_group := (1:.N)/.N, by = group]
+    dt.data[group_a == TRUE,  outcome := as.integer(propensity_quantile_by_group <= p.outcome.group.a )]
+    dt.data[group_a == FALSE, outcome := as.integer(propensity_quantile_by_group <= p.outcome.group.b )]
+
+    dt.data[outcome_control == 1 & outcome_treated == 1 , complier_status := "Sure Thing"]
+    dt.data[outcome_control == 0 & outcome_treated == 1 , complier_status := "Susceptible"]
+    dt.data[outcome_control == 1 & outcome_treated == 0 , complier_status := "Do Not Disturb"]
+    dt.data[outcome_control == 0 & outcome_treated == 0 , complier_status := "Lost Cause"]
+
+    dt.data[group_a == TRUE,  score := rnorm(n = .N, mean = outcome * disc.power.group.a^3 * 5)]
+    dt.data[group_a == FALSE, score := rnorm(n = .N, mean = outcome * disc.power.group.b^3 * 5)]
+    dt.data[, score := round(min_max_norm(score), 3)]
+
+    dt.data[complier_status == "Sure Thing",     score_uplift := rnorm(.N, mean = 0)]
+    dt.data[complier_status == "Lost Cause",     score_uplift := rnorm(.N, mean = 0)]
+    dt.data[complier_status == "Susceptible",    score_uplift := rnorm(.N, mean =   disc.power.uplift^3 * 5)]
+    dt.data[complier_status == "Do Not Disturb", score_uplift := rnorm(.N, mean = - disc.power.uplift^3 * 5)]
+    dt.data[, score_uplift := round(min_max_norm(score_uplift, range=c(-1,1)), 3)]
+
+    dt.data <- dt.data[order(-score)]
+    dt.data[, list(score, outcome, group, treated, score_uplift, complier_status)]
+    ## dt.data[, list(group, treated, score, score_uplift, outcome, unobs_propensity = propensity, unobs_uplift = uplift, unobs_score_error = score_error, unobs_complier_status = complier_status)]
+}
+
+roc.metrics <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0
+                        ) {
+    ## Calculate threshold statistics
+    dt.roc <- rbind(data.table(partition = " All", dt.data[, list(outcome, score)]),
+                     data.table(partition = dt.data[, group], dt.data[, list(outcome, score)]))
+    dt.roc <- dt.roc[order(-score)]
+    dt.roc[, one := 1]
+    dt.roc[, score_calibrated := cumsum(outcome)/cumsum(one), by=partition]
+    dt.roc <- dt.roc[order(-score_calibrated)]
+    dt.roc[, Positives := sum(outcome == 1), by = partition]
+    dt.roc[, Negatives := sum(outcome == 0), by = partition]
+    dt.roc[, TP := cumsum(outcome == 1), by = partition]
+    dt.roc[, FP := cumsum(outcome == 0), by = partition]
+    dt.roc[, FN := Positives - TP, by = partition]
+    dt.roc[, TN := Negatives - FP, by = partition]
+    dt.roc[, PP := TP + FP, by = partition]
+    dt.roc[, PN := FN + TN, by = partition]
+
+    dt.roc[, TPR := TP / Positives, by = partition]
+    dt.roc[, FPR := FP / Negatives, by = partition]
+    dt.roc[, PPV := TP / PP, by = partition]
+    dt.roc[, NPV := TN / PN, by = partition]
+    dt.roc[, n_targeted := (1:.N), by = partition]
+    dt.roc[, p_targeted := (1:.N)/.N, by = partition]
+
+    dt.roc[, Lift := (TP / n_targeted) / (Positives / .N), by = partition]
+
+    dt.roc[, Profit := TP * tp.benefit + FP * fp.benefit +
+                       FN * fn.benefit + TN * tn.benefit, by = partition]
+    dt.roc[, max_profit := max(Profit), by = partition]
+    dt.roc[, max_total_profit := max(Profit[partition == "A"]) + max(Profit[partition == "B"])]
+    dt.roc[, max_total_profit_unaware := max_profit[partition == " All"][1]]
+    return(dt.roc)
+}
+
+uplift.metrics <- function(dt.data,
+                           susceptible.benefit = 1,
+                           donotdisturb.benefit = -1,
+                           surething.benefit = 0,
+                           lostcause.benefit = 0
+                           ) {
+    ## Calculate threshold statistics
+    dt.roc.uplift <- rbind(data.table(partition = " All", dt.data[, list(complier_status, score_uplift)]),
+                     data.table(partition = dt.data[, group], dt.data[, list(complier_status, score_uplift)]))
+    dt.roc.uplift <- dt.roc.uplift[order(-score_uplift)]
+
+    dt.roc.uplift[, TotalSusceptibles  := sum(complier_status == "Susceptible"), by = partition]
+    dt.roc.uplift[, TotalDoNotDisturbs := sum(complier_status == "Do Not Disturb"), by = partition]
+    dt.roc.uplift[, TotalSureThings    := sum(complier_status == "Sure Thing"), by = partition]
+    dt.roc.uplift[, TotalLostCauses    := sum(complier_status == "Lost Cause"), by = partition]
+
+    dt.roc.uplift[, Susceptibles       := cumsum(complier_status == "Susceptible"), by = partition]
+    dt.roc.uplift[, DoNotDisturbs      := cumsum(complier_status == "Do Not Disturb"), by = partition]
+    dt.roc.uplift[, SureThings         := cumsum(complier_status == "Sure Thing"), by = partition]
+    dt.roc.uplift[, LostCauses         := cumsum(complier_status == "Lost Cause"), by = partition]
+
+    dt.roc.uplift[, SR := Susceptibles / TotalSusceptibles, by = partition]
+    dt.roc.uplift[, DNDR := DoNotDisturbs / TotalDoNotDisturbs, by = partition]
+    dt.roc.uplift[, STR := SureThings / TotalSureThings, by = partition]
+    dt.roc.uplift[, LCR := LostCauses / TotalLostCauses, by = partition]
+    dt.roc.uplift[, n_targeted := (1:.N), by = partition]
+    dt.roc.uplift[, p_targeted := (1:.N)/.N, by = partition]
+
+    dt.roc.uplift[, Profit :=
+                      Susceptibles * susceptible.benefit +
+                      DoNotDisturbs * donotdisturb.benefit +
+                      SureThings * surething.benefit +
+                      LostCauses * lostcause.benefit, by = partition]
+    dt.roc.uplift[, max_profit := max(Profit), by = partition]
+    dt.roc.uplift[, max_total_profit := max(Profit[partition == "A"]) + max(Profit[partition == "B"])]
+    dt.roc.uplift[, max_total_profit_unaware := max_profit[partition == " All"][1]]
+    return(dt.roc.uplift)
+
+}
+
+fairness.metrics <- function(dt.roc) {
+    dt.roc.merged <- CJ(p_targeted_a = dt.roc[partition == "A", unique(round(p_targeted, 2))],
+                        p_targeted_b = dt.roc[partition == "B", unique(round(p_targeted, 2))])
+    dt.roc.merged <- merge(dt.roc.merged,
+                       dt.roc[partition == "B",
+                              list(n_targeted_b = n_targeted[Profit == max(Profit)][1],
+                                   tpr_b = round(TPR[Profit == max(Profit)][1], 2),
+                                   fpr_b = round(FPR[Profit == max(Profit)][1], 2),
+                                   ppv_b = round(PPV[Profit == max(Profit)][1], 2),
+                                   npv_b = round(NPV[Profit == max(Profit)][1], 2),
+                                   lift_b = Lift[Profit == max(Profit)][1],
+                                   profit_b = max(Profit)),
+                              by=list(p_targeted_b = round(p_targeted, 2))],
+                       by = "p_targeted_b")
+    dt.roc.merged <- merge(dt.roc.merged,
+                       dt.roc[partition == "A",
+                              list(n_targeted_a = n_targeted[Profit == max(Profit)][1],
+                                   tpr_a = round(TPR[Profit == max(Profit)][1], 2),
+                                   fpr_a = round(FPR[Profit == max(Profit)][1], 2),
+                                   ppv_a = round(PPV[Profit == max(Profit)][1], 2),
+                                   npv_a = round(NPV[Profit == max(Profit)][1], 2),
+                                   lift_a = Lift[Profit == max(Profit)][1],
+                                   profit_a = max(Profit)),
+                              by=list(p_targeted_a = round(p_targeted, 2))],
+                       by = "p_targeted_a")
+
+    ## dt.roc.merged[, p_targeted_all := round(( n_targeted_a + n_targeted_b )  / max(n_targeted_a + n_targeted_b), 2)]
+    ## dt.roc.merged <- merge(dt.roc.merged,
+    ##                    dt.roc[partition == " All",
+    ##                           list(n_targeted_all = n_targeted[Profit == max(Profit)][1],
+    ##                                tpr_all = round(TPR[Profit == max(Profit)][1], 2),
+    ##                                fpr_all = round(FPR[Profit == max(Profit)][1], 2),
+    ##                                ppv_all = round(PPV[Profit == max(Profit)][1], 2),
+    ##                                npv_all = round(NPV[Profit == max(Profit)][1], 2),
+    ##                                profit_all = max(Profit)),
+    ##                           by=list(p_targeted_all = round(p_targeted, 2))],
+    ##                    by = "p_targeted_all", all.x = TRUE)
+
+    dt.roc.merged[, total_profit := profit_a + profit_b]
+    dt.roc.merged[, max_total_profit := max(total_profit)]
+    dt.roc.merged[, max_total_profit_unaware := dt.roc[1, max_total_profit_unaware]]
+    ## dt.roc.merged[, p_targeted_unaware := dt.roc[partition == " All", p_targeted[Profit == max_total_profit_unaware][1]]]
+    dt.roc.merged[, max_total_profit_indep := max(total_profit[p_targeted_b == p_targeted_a])]
+    # calculate minimum differences because for some metrics it may not be possible to get exactly the same value
+    dt.roc.merged[, min_diff_tpr := min(abs(tpr_b - tpr_a))]
+    dt.roc.merged[, min_diff_fpr := min(abs(fpr_b - fpr_a))]
+    dt.roc.merged[, min_diff_ppv := min(abs(ppv_b - ppv_a))]
+    dt.roc.merged[, min_diff_npv := min(abs(npv_b - npv_a))]
+    dt.roc.merged[, max_total_profit_sep_tpr := max(total_profit[abs(tpr_b - tpr_a) == min_diff_tpr])]
+    dt.roc.merged[, max_total_profit_sep_fpr := max(total_profit[abs(fpr_b - fpr_a) == min_diff_fpr])]
+    dt.roc.merged[, max_total_profit_suf_ppv := max(total_profit[abs(ppv_b - ppv_a) == min_diff_ppv])]
+    dt.roc.merged[, max_total_profit_suf_npv := max(total_profit[abs(npv_b - npv_a) == min_diff_npv])]
+
+    dt.roc.merged[total_profit == max_total_profit, optimal := "Unconstrained"]
+    dt.roc[partition == " All" & Profit == max_total_profit_unaware]
+    dt.roc.merged[total_profit == max_total_profit_unaware, optimal := "Unaware"]
+    dt.roc.merged[total_profit == max_total_profit_indep & p_targeted_a == p_targeted_b,         optimal := "Independence (PP)"]
+    dt.roc.merged[total_profit == max_total_profit_sep_tpr & abs(tpr_b - tpr_a) == min_diff_tpr, optimal := "Separation (TPR)"]
+    dt.roc.merged[total_profit == max_total_profit_sep_fpr & abs(fpr_b - fpr_a) == min_diff_fpr, optimal := "Separation (FPR)"]
+    dt.roc.merged[total_profit == max_total_profit_suf_ppv & abs(ppv_b - ppv_a) == min_diff_ppv, optimal := "Sufficiency (PPV)"]
+    dt.roc.merged[total_profit == max_total_profit_suf_npv & abs(npv_b - npv_a) == min_diff_npv, optimal := "Sufficiency (NPV)"]
+    dt.roc.merged
+}
+
+#+END_SRC
+
+
+** UI
+
+#+BEGIN_SRC R :results none :tangle ./shiny/ai-business/ui.R
+
+ui <- fluidPage(
+  # Application title
+  titlePanel(paste0("AI Impact on Business: Exploring Prediction and Judgment")),
+  # Sidebar
+  sidebarLayout(
+    sidebarPanel(
+      radioGroupButtons(inputId = "typeofdata",
+                        label = "Data",
+                        choices = c("Generate Data" = "generate.data",
+                                    "Load from File" = "load.data"),
+                        ),
+   ## radioButtons("typeofdata", "Choose whether to generate data or load from a file:",
+   ##             c("Generate data" = "generate.data",
+   ##               "Load data from file" = "load.data"),
+   ##             inline = TRUE),
+     conditionalPanel(condition = "input.typeofdata == 'generate.data'",
+     h4("Generate data using the parameters below:"),
+      ## actionButton("generate.data.button", "Generate Data"),
+     numericInput("n.obs",
+                   label = "Observations",
+                   value = 1000,
+                   min = 100,
+                   max = 50000),
+     fluidRow(
+      column(6,
+      sliderInput("p.outcome.group.a",
+                  label = "% of Positives Group A",
+                  value = c(20),
+                  min = 0, max = 100)
+      ),
+      column(6,
+      sliderInput("disc.power.group.a",
+                  label = "Discr. Power Group A",
+                  value = c(0.5),
+                  min = 0, max = 1, step = 0.05)
+      )),
+    downloadButton("downloadData", "Download Generated Data"),
+     ), # conditional panel
+     conditionalPanel(condition = "input.typeofdata == 'load.data'",
+      h4("Upload a CSV file:"),
+      p("The file must contain at least the following columns"),
+      tags$ol(
+        tags$li("score - model prediction (e.g., probability)"),
+        tags$li("outcome - target variable"),
+        tags$li("group - group to which the observation belongs (protected variable, e.g., gender)")),
+      p("For Uplift Analysis, the file must further contain"),
+      tags$ol(
+        tags$li("score_uplift - uplift model prediction"),
+        tags$li("treated - whether the unit was treated"),
+        tags$li("complier_status")),
+      fileInput('target_upload', 'Choose file to upload',
+                accept = c(
+                  'text/csv',
+                  'text/comma-separated-values',
+                  '.csv'
+            )),
+     ), # conditional panel
+      hr(),
+     h4("Benefit/ Cost Analysis"),
+     switchInput(inputId = "upliftanalysis",
+                 label = "Uplift Analysis",
+                 onLabel = "Yes",
+                 offLabel = "No",
+                 value = FALSE,
+                 ## disabled = TRUE,
+                 labelWidth = "100px"),
+     p("Benefit of targeting an obervation of the following types when compared with not targeting."),
+     conditionalPanel(condition = "input.upliftanalysis == ''",
+     fluidRow(
+       column(6,
+         numericInput("tp.benefit",
+                label = "True Positive",
+                value = 1)),
+       column(6,
+        numericInput("fp.benefit",
+                label = "False Positive",
+                value = -1))),
+     ## fluidRow(
+     ##   column(6,
+     ##     numericInput("fn.benefit",
+     ##            label = "FN",
+     ##            value = 0)),
+     ##   column(6,
+     ##    numericInput("tn.benefit",
+     ##            label = "TN",
+     ##            value = 0))),
+     ), # conditional panel
+     conditionalPanel(condition = "input.upliftanalysis != ''",
+     p("WARNING: Uplift Analyis is not fully implemented yet"),
+     fluidRow(
+       column(6,
+         numericInput("susceptible.benefit",
+                label = "Susceptible",
+                value = 4)),
+       column(6,
+        numericInput("surething.benefit",
+                label = "Sure Thing",
+                value = -1))),
+     fluidRow(
+       column(6,
+         numericInput("lostcause.benefit",
+                label = "Lost Cause",
+                value = -1)),
+       column(6,
+        numericInput("donotdisturb.benefit",
+                label = "Do Not Disturb",
+                value = -6))),
+     conditionalPanel(condition = "input.typeofdata == 'generate.data'",
+     fluidRow(
+       column(6,
+      sliderInput("p.treated",
+                  label = "% Treated",
+                  value = c(0),
+                  min = 0, max = 100),
+      sliderInput("corr.uplift.outcome",
+                  label = "Corr. Uplift/Outcome",
+                  value = c(0),
+                  min = -1, max = 1, step = 0.1),
+      ),
+       column(6,
+      sliderInput("ate",
+                  label = "Avg. Treat. Effect (ATE)",
+                  value = c(0),
+                  min = -1, max = 1, step = 0.1),
+      sliderInput("disc.power.uplift",
+                  label = "Discr. Power Uplift",
+                  value = c(1),
+                  min = 0, max = 1, step = 0.1),
+      )),
+     ), # conditional panel
+     ), # conditional panel
+     hr(),
+     h4("Fairness Analysis"),
+     switchInput(inputId = "fairnessanalysis",
+                 label = "Fairness Analysis",
+                 onLabel = "Yes",
+                 offLabel = "No",
+                 labelWidth = "120px"),
+     conditionalPanel(condition = "input.fairnessanalysis != ''",
+     conditionalPanel(condition = "input.typeofdata == 'generate.data'",
+     fluidRow(
+      column(12,
+      sliderInput("p.group.b",
+                  label = "% Obs. Group B",
+                  value = c(0),
+                  min = 0, max = 95)
+      )),
+     fluidRow(
+      column(6,
+      sliderInput("p.outcome.group.b",
+                  label = "% of Positives Group B",
+                  value = c(20),
+                  min = 0, max = 100)
+      ),
+      column(6,
+      sliderInput("disc.power.group.b",
+                  label = "Discr. Power Group B",
+                  value = c(0.2),
+                  min = 0, max = 1, step = 0.05)
+      ))
+     ), # conditional panel
+      checkboxGroupInput("profit.constraints", "Fairness Constraints:",
+            choices = list("Unconstrained",
+                           "Independence (PP)",
+                           "Separation (TPR)",
+                           "Separation (FPR)",
+                           "Sufficiency (PPV)",
+                           "Sufficiency (NPV)",
+                           "Unaware"),
+            selected = list(),
+            inline = FALSE
+      ),
+     ), # conditional panel
+            width = 4
+    ),
+
+    mainPanel(
+      tabsetPanel(id = "tabs",
+        tabPanel("Data", id = data, uiOutput("data.info")),
+        tabPanel("ROC", id = "roc", {plotlyOutput("roc.plot", width="800px", height="500px")}),
+        tabPanel("Cumulative Response", id = "cum.resp", {plotlyOutput("cum.resp.plot", width="800px", height="500px")}),
+        tabPanel("Lift", id = "lift.curve", {plotlyOutput("lift.curve.plot", width="800px", height="500px")}),
+        tabPanel("Profit", id = "profit", {uiOutput("profit.plot")}),
+        ## tabPanel("Profit", id = "profit", {plotlyOutput("profit.plot", width="800px", height="500px")}),
+        ## tabPanel("ProfitUplift", id = "profit.uplift", {plotlyOutput("profit.uplift.plot", width="800px", height="500px")}),
+        ## conditionalPanel(condition = "input.fairnessanalysis != ''",
+        tabPanel("Fairness Stats", id = "stats", htmlOutput("fairness.stats")),
+        ## ), # conditional panel
+        ## tabPanel("ROC Stats", id = "roc.stats", htmlOutput("roc.stats"))
+          )
+    )
+  )
+)
+#+END_SRC
+
+#+BEGIN_SRC R :results none :tangle ./shiny/ai-business/ui.R
+ui
+#+END_SRC
+
+#+RESULTS:
+
+** Server
+
+#+BEGIN_SRC R :results none :tangle ./shiny/ai-business/server.R
+
+roc.plot <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0,
+                     profit.constraints = c("Unconstrained",
+                                            "Independence (PP)",
+                                            "Separation (TPR)",
+                                            "Separation (FPR)",
+                                            "Sufficiency (PPV)",
+                                            "Sufficiency (NPV)",
+                                            "Unaware")
+                     ) {
+  dt.roc <- roc.metrics(dt.data,
+                        tp.benefit = tp.benefit,
+                        fp.benefit = fp.benefit,
+                        fn.benefit = fn.benefit,
+                        tn.benefit = tn.benefit
+                        )
+  roc.plot.from.roc(dt.roc, profit.constraints)
+}
+
+roc.plot.from.roc <- function(dt.roc, profit.constraints) {
+
+  dt.roc.merged <- fairness.metrics(dt.roc)
+
+  ggplot(dt.roc) +
+    geom_line(aes(x=FPR, y= TPR),  linetype = "dashed", color="gray",
+              data = data.table(FPR = c(0, 1), TPR = c(0, 1))) +
+    geom_line(aes(FPR, TPR, color=partition)) +
+    geom_point(aes(fpr_a, tpr_a, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(fpr_b, tpr_b, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(FPR, TPR, color=partition, fill=partition), size=2, shape = 23,
+               data = dt.roc[Profit == max_profit, .SD[1], by=partition]) +
+    theme_bw()
+}
+
+cum.resp.plot <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0,
+                     profit.constraints = c("Unconstrained",
+                                            "Independence (PP)",
+                                            "Separation (TPR)",
+                                            "Separation (FPR)",
+                                            "Sufficiency (PPV)",
+                                            "Sufficiency (NPV)",
+                                            "Unaware")
+                     ) {
+  dt.roc <- roc.metrics(dt.data,
+                        tp.benefit = tp.benefit,
+                        fp.benefit = fp.benefit,
+                        fn.benefit = fn.benefit,
+                        tn.benefit = tn.benefit
+                        )
+  cum.resp.plot.from.roc(dt.roc, profit.constraints)
+}
+
+cum.resp.plot.from.roc <- function(dt.roc, profit.constraints) {
+
+  dt.roc.merged <- fairness.metrics(dt.roc)
+
+  ggplot(dt.roc) +
+    geom_line(aes(x=p_targeted, y= TPR),  linetype = "dashed", color="gray",
+              data = data.table(p_targeted = c(0, 1), TPR = c(0, 1))) +
+    geom_line(aes(p_targeted, TPR, color=partition)) +
+    geom_point(aes(p_targeted_a, tpr_a, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(p_targeted_b, tpr_b, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(p_targeted, TPR, color=partition, fill=partition), size=2, shape = 23,
+               data = dt.roc[Profit == max_profit, .SD[1], by=partition]) +
+    theme_bw()
+}
+
+lift.curve.plot <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0,
+                     profit.constraints = c("Unconstrained",
+                                            "Independence (PP)",
+                                            "Separation (TPR)",
+                                            "Separation (FPR)",
+                                            "Sufficiency (PPV)",
+                                            "Sufficiency (NPV)",
+                                            "Unaware")
+                     ) {
+  dt.roc <- roc.metrics(dt.data,
+                        tp.benefit = tp.benefit,
+                        fp.benefit = fp.benefit,
+                        fn.benefit = fn.benefit,
+                        tn.benefit = tn.benefit
+)
+  lift.curve.plot.from.roc(dt.roc, profit.constraints)
+}
+
+lift.curve.plot.from.roc <- function(dt.roc, profit.constraints) {
+
+  dt.roc.merged <- fairness.metrics(dt.roc)
+
+  ggplot(dt.roc) +
+    geom_hline(aes(yintercept = 1),  linetype = "dashed", color="gray") +
+    geom_line(aes(p_targeted, Lift, color=partition)) +
+    geom_point(aes(p_targeted_a, lift_a, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(p_targeted_b, lift_b, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(p_targeted, Lift, color=partition, fill=partition), size=2, shape = 23,
+               data = dt.roc[Profit == max_profit, .SD[1], by=partition]) +
+    theme_bw()
+}
+
+profit.plot <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0,
+                     profit.constraints = c("Unconstrained",
+                                            "Independence (PP)",
+                                            "Separation (TPR)",
+                                            "Separation (FPR)",
+                                            "Sufficiency (PPV)",
+                                            "Sufficiency (NPV)",
+                                            "Unaware")
+                     ) {
+  dt.roc <- roc.metrics(dt.data,
+                        tp.benefit = tp.benefit,
+                        fp.benefit = fp.benefit,
+                        fn.benefit = fn.benefit,
+                        tn.benefit = tn.benefit
+)
+
+  profit.plot.from.roc(dt.roc, profit.constraints)
+}
+
+profit.plot.from.roc <- function(dt.roc, profit.constraints) {
+
+  dt.roc.merged <- fairness.metrics(dt.roc)
+
+  ggplot(dt.roc) +
+    geom_line(aes(x=p_targeted, y= Profit),  linetype = "dashed", color="gray",
+              data = data.table(p_targeted = c(0, 1),
+                                Profit = c(dt.roc[partition == " All" & n_targeted == 1, Profit],
+                                           dt.roc[partition == " All" & p_targeted == 1, Profit]))) +
+    geom_line(aes(p_targeted, Profit, color=partition)) +
+    geom_point(aes(p_targeted_a, profit_a, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(p_targeted_b, profit_b, fill=optimal),  size=4, shape = 23,
+               data = dt.roc.merged[!is.na(optimal) & optimal %in% profit.constraints, .SD[1], by=optimal]) +
+    geom_point(aes(p_targeted, Profit, color=partition, fill=partition), size=2, shape = 23,
+               data = dt.roc[Profit == max_profit, .SD[1], by=partition]) +
+    theme_bw()
+}
+
+profit.uplift.plot <- function(dt.data,
+                        susceptible.benefit = 1,
+                        donotdisturb.benefit = -1,
+                        surething.benefit = 0,
+                        lostcause.benefit = 0,
+                     profit.constraints = c("Unconstrained",
+                                            "Independence (PP)",
+                                            "Separation (TPR)",
+                                            "Separation (FPR)",
+                                            "Sufficiency (PPV)",
+                                            "Sufficiency (NPV)",
+                                            "Unaware")
+                     ) {
+  dt.roc.uplift <- uplift.metrics(dt.data,
+                        susceptible.benefit = susceptible.benefit,
+                        donotdisturb.benefit = donotdisturb.benefit,
+                        surething.benefit = surething.benefit,
+                        lostcause.benefit = lostcause.benefit
+)
+
+  profit.uplift.plot.from.roc(dt.roc.uplift, profit.constraints)
+}
+
+profit.uplift.plot.from.roc <- function(dt.roc.uplift, profit.constraints) {
+
+  ggplot(dt.roc.uplift) +
+    geom_line(aes(x=p_targeted, y= Profit),  linetype = "dashed", color="gray",
+              data = data.table(p_targeted = c(0, 1),
+                                Profit = c(dt.roc.uplift[partition == " All" & n_targeted == 1, Profit],
+                                           dt.roc.uplift[partition == " All" & p_targeted == 1, Profit]))) +
+    geom_line(aes(p_targeted, Profit, color=partition)) +
+    geom_point(aes(p_targeted, Profit, color=partition, fill=partition), size=2, shape = 23,
+               data = dt.roc.uplift[Profit == max_profit, .SD[1], by=partition]) +
+    theme_bw()
+}
+
+
+fairness.stats <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0
+                     ) {
+  dt.roc <- roc.metrics(dt.data,
+                        tp.benefit = tp.benefit,
+                        fp.benefit = fp.benefit,
+                        fn.benefit = fn.benefit,
+                        tn.benefit = tn.benefit)
+  dt.roc.merged <- fairness.metrics(dt.roc)
+
+  dt.roc.merged[!is.na(optimal),
+                .SD[1],
+                by=optimal][order(-total_profit),
+                            list(optimal, total_profit, n_targeted_a, n_targeted_b,
+                                 p_targeted_a, p_targeted_b, tpr_a, tpr_b, fpr_a, fpr_b, ppv_a, ppv_b, npv_a, npv_b)]
+
+}
+
+roc.stats <- function(dt.data,
+                        tp.benefit = 1,
+                        fp.benefit = -1,
+                        fn.benefit = 0,
+                        tn.benefit = 0
+                     ) {
+  dt.roc <- roc.metrics(dt.data,
+                        tp.benefit = tp.benefit,
+                        fp.benefit = fp.benefit,
+                        fn.benefit = fn.benefit,
+                        tn.benefit = tn.benefit
+)
+  dt.roc
+}
+
+server <- function(input, output, session) {
+
+ dt.data <- data.table()
+ get.data <- reactive({
+    inFile <- input$target_upload
+    if (input$typeofdata == "load.data" & is.null(inFile)) {
+    return(dt.data)
+    }
+    if (input$typeofdata == "generate.data" ) {
+      dt.data <<- generate.data(n.obs = input$n.obs,
+                        p.group.b = (input$p.group.b / 100),
+                        p.treated = (input$p.treated / 100),
+                        p.outcome.group.a = (input$p.outcome.group.a / 100),
+                        p.outcome.group.b = (input$p.outcome.group.b / 100),
+                        disc.power.group.a = input$disc.power.group.a,
+                        disc.power.group.b = input$disc.power.group.b,
+                        ate.group.a = input$ate,
+                        ate.group.b = input$ate,
+                        disc.power.uplift = input$disc.power.uplift,
+                        corr.uplift.outcome = input$corr.uplift.outcome
+                                           )
+    } else {
+      dt.data <<- fread(inFile$datapath)
+    }
+    return(dt.data)
+  })
+
+  # Downloadable csv of selected dataset ----
+  output$downloadData <- downloadHandler(
+    filename = function() {
+      paste0(paste(as_datetime(now()), "generated_data",
+            input$n.obs, input$p.group.b,
+            input$p.outcome.group.a, input$p.outcome.group.b,
+            input$disc.power.group.a, input$disc.power.group.b,
+            sep = "-"),
+            ".csv")
+    },
+    content = function(file) {
+      fwrite(get.data(), file, sep=";")
+    }
+  )
+  output$data.info <- renderUI({
+    dt.data <<- get.data()
+    dt.roc <- roc.metrics(dt.data)
+    dt.auc <- dt.roc[, list(TPR, d_FPR = FPR - shift(FPR)),
+                     by=partition][, list(AUC = round(sum(TPR * d_FPR, na.rm=TRUE), 3)),
+                                   by=list(Group = partition)]
+    fluidPage(
+      h4("Statistics:"),
+      renderTable({merge(dt.roc[, list(.N,
+                                  Positives = Positives[1],
+                                  "% Positives" = Positives[1] / .N),
+                                by=list(Group = partition)],
+                         dt.auc, by="Group")[order(Group)]}),
+     conditionalPanel(condition = "input.fairnessanalysis == ''",
+      renderPlotly({
+        ggplot(cbind(dt.data,
+                     dt.data[, list(Outcome = ifelse(outcome == 1, "Positive", "Negative"))])) +
+                     geom_histogram(
+                                    aes(score, fill=Outcome),
+                                    alpha = 0.5, position = "identity", bins = 50) +
+                      scale_fill_manual(values = c("Positive" = "green",
+                                                   "Negative" = "red")) +
+          xlab("Score")
+      }),
+      ), # conditional panel
+     conditionalPanel(condition = "input.fairnessanalysis != ''",
+      renderPlotly({
+        dt.tmp <- cbind(dt.data,
+                     dt.data[, list(Outcome = ifelse(group == "A",
+                                           ifelse(outcome == 1, "Positive / Group A", "Negative / Group A"),
+                                           ifelse(outcome == 1, "Positive / Group B", "Negative / Group B")))])
+        ggplot() +
+                     geom_histogram(data = dt.tmp[outcome == 0],
+                                    aes(score, fill=Outcome),
+                                    alpha = 0.5, bins = 50) +
+                     geom_histogram(data = dt.tmp[outcome == 1],
+                                    aes(score, fill=Outcome),
+                                    alpha = 0.5, bins = 50) +
+                      scale_fill_manual(values = c("Positive / Group A" = "green",
+                                                   "Negative / Group A" = "red",
+                                                   "Positive / Group B" = "darkgreen",
+                                                   "Negative / Group B" = "darkred")) +
+          xlab("Score")
+      }),
+      ), # conditional panel
+     conditionalPanel(condition = "input.upliftanalysis != ''",
+      renderPlotly({
+        ggplot(dt.data[order(complier_status)]) +
+                     geom_histogram(data=,
+                                    aes(score_uplift, fill=complier_status),
+                                    alpha = 0.5, position = "identity", bins = 50) +
+                      scale_fill_manual(values = c("Do Not Disturb" = "red",
+                                                   "Lost Cause" = "gray",
+                                                   "Sure Thing" = "lightblue",
+                                                   "Susceptible" = "green")) +
+          xlab("Score Uplift")
+        }),
+#      DT::datatable(dt.data, filter = "top", options = list(pageLength = 20)))
+      renderTable({dt.data[order(complier_status), list(.N), by=list(Type = complier_status)]})))
+
+  })
+  output$roc.plot <-
+        renderPlotly({roc.plot(get.data(),
+                        tp.benefit = input$tp.benefit,
+                        fp.benefit = input$fp.benefit,
+                        ## fn.benefit = input$fn.benefit,
+                        ## tn.benefit = input$tn.benefit,
+                        profit.constraints = input$profit.constraints
+                        )})
+  output$cum.resp.plot <-
+        renderPlotly({cum.resp.plot(get.data(),
+                        tp.benefit = input$tp.benefit,
+                        fp.benefit = input$fp.benefit,
+                        ## fn.benefit = input$fn.benefit,
+                        ## tn.benefit = input$tn.benefit,
+                        profit.constraints = input$profit.constraints
+                        )})
+  output$lift.curve.plot <-
+        renderPlotly({lift.curve.plot(get.data(),
+                        tp.benefit = input$tp.benefit,
+                        fp.benefit = input$fp.benefit,
+                        ## fn.benefit = input$fn.benefit,
+                        ## tn.benefit = input$tn.benefit,
+                        profit.constraints = input$profit.constraints
+                        )})
+  output$profit.plot <-
+    renderUI({
+      fluidPage(
+    conditionalPanel(condition = "input.upliftanalysis == ''",
+        renderPlotly({ggplotly(profit.plot(get.data(),
+                        tp.benefit = input$tp.benefit,
+                        fp.benefit = input$fp.benefit,
+                        ## fn.benefit = input$fn.benefit,
+                        ## tn.benefit = input$tn.benefit,
+                        profit.constraints = input$profit.constraints
+                        ), width=800, height=500)}),
+       ),
+     conditionalPanel(condition = "input.upliftanalysis != ''",
+        renderPlotly({ggplotly(profit.uplift.plot(get.data(),
+                        susceptible.benefit = input$susceptible.benefit,
+                        donotdisturb.benefit = input$donotdisturb.benefit,
+                        surething.benefit = input$surething.benefit,
+                        lostcause.benefit = input$lostcause.benefit
+                        ), width=800, height=500)})
+        )
+      )
+    })
+  output$fairness.stats <- renderUI({
+        DT::datatable(fairness.stats(get.data(),
+                        tp.benefit = input$tp.benefit,
+                        fp.benefit = input$fp.benefit
+                        ## fn.benefit = input$fn.benefit,
+                        ## tn.benefit = input$tn.benefit
+))})
+  output$roc.stats <- renderUI({
+    DT::datatable(roc.stats(get.data(),
+                        tp.benefit = input$tp.benefit,
+                        fp.benefit = input$fp.benefit
+                        ## fn.benefit = input$fn.benefit,
+                        ## tn.benefit = input$tn.benefit
+))})
+
+}
+#+END_SRC
+
+#+BEGIN_SRC R :results none :tangle ./shiny/ai-business/server.R
+server
+#+END_SRC
+
+** Launch
+
+#+BEGIN_SRC R :results none
+shinyApp(ui = ui, server = server)
+#+END_SRC
+
+
+#+RESULTS:
+
+
