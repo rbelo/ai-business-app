@@ -19,8 +19,8 @@
 #+begin_src R
 dd <- generate.data(
                     p.treated = 0.5,
-                    disc.power.group.a = 0.6,
-                    disc.power.group.b = 0.3)
+                    auc.group.a = 0.6,
+                    auc.group.b = 0.3)
 ss <- uplift.metrics(dd)
 ggplot(dd) +
   geom_histogram(aes(score, fill=factor(outcome)),
@@ -49,11 +49,11 @@ generate.data <- function(n.obs = 10000,
                           p.treated = 0.5,
                           p.outcome.group.a = 0.7,
                           p.outcome.group.b = 0.2,
-                          disc.power.group.a = 0.5,
-                          disc.power.group.b = 0.5,
+                          auc.group.a = 0.7,
+                          auc.group.b = 0.7,
                           ate.group.a = 1,
                           ate.group.b = 0,
-                          disc.power.uplift = 0.5,
+                          auc.uplift = 0.5,
                           corr.uplift.outcome = 0
                          ) {
 
@@ -93,14 +93,14 @@ generate.data <- function(n.obs = 10000,
     dt.data[outcome_control == 1 & outcome_treated == 0 , complier_status := "Do Not Disturb"]
     dt.data[outcome_control == 0 & outcome_treated == 0 , complier_status := "Lost Cause"]
 
-    dt.data[group_a == TRUE,  score := rnorm(n = .N, mean = outcome * disc.power.group.a^3 * 5)]
-    dt.data[group_a == FALSE, score := rnorm(n = .N, mean = outcome * disc.power.group.b^3 * 5)]
+    dt.data[group_a == TRUE,  score := rnorm(n = .N, mean = outcome * min(6, qnorm(auc.group.a, sd = sqrt(2))))]
+    dt.data[group_a == FALSE, score := rnorm(n = .N, mean = outcome * min(6, qnorm(auc.group.b, sd = sqrt(2))))]
     dt.data[, score := round(min_max_norm(score), 3)]
 
     dt.data[complier_status == "Sure Thing",     score_uplift := rnorm(.N, mean = 0)]
     dt.data[complier_status == "Lost Cause",     score_uplift := rnorm(.N, mean = 0)]
-    dt.data[complier_status == "Susceptible",    score_uplift := rnorm(.N, mean =   disc.power.uplift^3 * 5)]
-    dt.data[complier_status == "Do Not Disturb", score_uplift := rnorm(.N, mean = - disc.power.uplift^3 * 5)]
+    dt.data[complier_status == "Susceptible",    score_uplift := rnorm(.N, mean =   min(6, qnorm(auc.uplift, sd = sqrt(2))))]
+    dt.data[complier_status == "Do Not Disturb", score_uplift := rnorm(.N, mean = - min(6, qnorm(auc.uplift, sd = sqrt(2))))]
     dt.data[, score_uplift := round(min_max_norm(score_uplift, range=c(-1,1)), 3)]
 
     dt.data <- dt.data[order(-score)]
@@ -112,7 +112,8 @@ roc.metrics <- function(dt.data,
                         tp.benefit = 1,
                         fp.benefit = -1,
                         fn.benefit = 0,
-                        tn.benefit = 0
+                        tn.benefit = 0,
+                        fixed.cost = 0
                         ) {
     ## Calculate threshold statistics
     dt.roc <- rbind(data.table(partition = " All", dt.data[, list(outcome, score)]),
@@ -140,7 +141,7 @@ roc.metrics <- function(dt.data,
     dt.roc[, Lift := (TP / n_targeted) / (Positives / .N), by = partition]
 
     dt.roc[, Profit := TP * tp.benefit + FP * fp.benefit +
-                       FN * fn.benefit + TN * tn.benefit, by = partition]
+                       FN * fn.benefit + TN * tn.benefit - fixed.cost, by = partition]
     dt.roc[, max_profit := max(Profit), by = partition]
     dt.roc[, max_total_profit := max(Profit[partition == "A"]) + max(Profit[partition == "B"])]
     dt.roc[, max_total_profit_unaware := max_profit[partition == " All"][1]]
@@ -265,7 +266,7 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       radioGroupButtons(inputId = "typeofdata",
-                        label = "Data",
+                        label = h3("Data"),
                         choices = c("Generate Data" = "generate.data",
                                     "Load from File" = "load.data"),
                         ),
@@ -278,21 +279,21 @@ ui <- fluidPage(
       ## actionButton("generate.data.button", "Generate Data"),
      numericInput("n.obs",
                    label = "Observations",
-                   value = 1000,
+                   value = 10000,
                    min = 100,
                    max = 50000),
      fluidRow(
       column(6,
       sliderInput("p.outcome.group.a",
-                  label = "% of Positives Group A",
+                  label = "% of Positives",
                   value = c(20),
                   min = 0, max = 100)
       ),
       column(6,
-      sliderInput("disc.power.group.a",
-                  label = "Discr. Power Group A",
-                  value = c(0.5),
-                  min = 0, max = 1, step = 0.05)
+      sliderInput("auc.group.a",
+                  label = "Model Quality (AUC)",
+                  value = c(0.7),
+                  min = 0.5, max = 1, step = 0.01)
       )),
     downloadButton("downloadData", "Download Generated Data"),
      ), # conditional panel
@@ -316,6 +317,10 @@ ui <- fluidPage(
             )),
      ), # conditional panel
       hr(),
+     h3("Analysis"),
+      tabsetPanel(id = "analysis.param.tabs",
+        tabPanel(h5("Benefit/Cost"), id = "t1",
+     fluidRow(),
      h4("Benefit/ Cost Analysis"),
      switchInput(inputId = "upliftanalysis",
                  label = "Uplift Analysis",
@@ -335,15 +340,21 @@ ui <- fluidPage(
         numericInput("fp.benefit",
                 label = "False Positive",
                 value = -1))),
-     ## fluidRow(
-     ##   column(6,
-     ##     numericInput("fn.benefit",
-     ##            label = "FN",
-     ##            value = 0)),
-     ##   column(6,
-     ##    numericInput("tn.benefit",
-     ##            label = "TN",
-     ##            value = 0))),
+     fluidRow(
+       column(6,
+         numericInput("fn.benefit",
+                label = "False Negative",
+                value = 0)),
+       column(6,
+        numericInput("tn.benefit",
+                label = "True Negative",
+                value = 0))),
+     fluidRow(
+       column(6,
+         numericInput("fixed.cost",
+                label = "Fixed Cost",
+                value = 0))),
+
      ), # conditional panel
      conditionalPanel(condition = "input.upliftanalysis != ''",
      p("WARNING: Uplift Analyis is not fully implemented yet"),
@@ -382,14 +393,15 @@ ui <- fluidPage(
                   label = "Avg. Treat. Effect (ATE)",
                   value = c(0),
                   min = -1, max = 1, step = 0.1),
-      sliderInput("disc.power.uplift",
-                  label = "Discr. Power Uplift",
-                  value = c(1),
-                  min = 0, max = 1, step = 0.1),
+      sliderInput("auc.uplift",
+                  label = "AUC Uplift",
+                  value = c(0.5),
+                  min = 0.5, max = 1, step = 0.01),
       )),
      ), # conditional panel
      ), # conditional panel
-     hr(),
+        ),
+        tabPanel(h5("Fairness"), id = "t2",
      h4("Fairness Analysis"),
      switchInput(inputId = "fairnessanalysis",
                  label = "Fairness Analysis",
@@ -413,10 +425,10 @@ ui <- fluidPage(
                   min = 0, max = 100)
       ),
       column(6,
-      sliderInput("disc.power.group.b",
-                  label = "Discr. Power Group B",
-                  value = c(0.2),
-                  min = 0, max = 1, step = 0.05)
+      sliderInput("auc.group.b",
+                  label = "AUC Group B",
+                  value = c(0.6),
+                  min = 0.5, max = 1, step = 0.01)
       ))
      ), # conditional panel
       checkboxGroupInput("profit.constraints", "Fairness Constraints:",
@@ -431,7 +443,8 @@ ui <- fluidPage(
             inline = FALSE
       ),
      ), # conditional panel
-            width = 4
+        )),
+           width = 4
     ),
 
     mainPanel(
@@ -468,6 +481,7 @@ roc.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -480,7 +494,8 @@ roc.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
                         )
   roc.plot.from.roc(dt.roc, profit.constraints)
 }
@@ -507,6 +522,7 @@ cum.resp.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -519,7 +535,8 @@ cum.resp.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
                         )
   cum.resp.plot.from.roc(dt.roc, profit.constraints)
 }
@@ -546,6 +563,7 @@ lift.curve.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -558,7 +576,8 @@ lift.curve.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
 )
   lift.curve.plot.from.roc(dt.roc, profit.constraints)
 }
@@ -584,6 +603,7 @@ profit.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -596,7 +616,8 @@ profit.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
 )
 
   profit.plot.from.roc(dt.roc, profit.constraints)
@@ -662,13 +683,16 @@ fairness.stats <- function(dt.data,
                         tp.benefit = 1,
                         fp.benefit = -1,
                         fn.benefit = 0,
-                        tn.benefit = 0
+                        tn.benefit = 0,
+                        fixed.cost = 0
                      ) {
   dt.roc <- roc.metrics(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit)
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
+                        )
   dt.roc.merged <- fairness.metrics(dt.roc)
 
   dt.roc.merged[!is.na(optimal),
@@ -683,19 +707,47 @@ roc.stats <- function(dt.data,
                         tp.benefit = 1,
                         fp.benefit = -1,
                         fn.benefit = 0,
-                        tn.benefit = 0
+                        tn.benefit = 0,
+                        fixed.cost = 0
                      ) {
   dt.roc <- roc.metrics(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
 )
   dt.roc
 }
 
 server <- function(input, output, session) {
-
+  observe({
+      query <- parseQueryString(session$clientData$url_search)
+      if (!is.null(query[['n']])) {
+        updateTextInput(session, "n.obs", value = query[['n']])
+      }
+      if (!is.null(query[['ppos']])) {
+        updateSliderInput(session, "p.outcome.group.a", value = query[['ppos']])
+      }
+      if (!is.null(query[['auc']])) {
+        updateSliderInput(session, "auc.group.a", value = query[['auc']])
+      }
+      if (!is.null(query[['tp']])) {
+        updateTextInput(session, "tp.benefit", value = query[['tp']])
+      }
+      if (!is.null(query[['fp']])) {
+        updateTextInput(session, "fp.benefit", value = query[['fp']])
+      }
+      if (!is.null(query[['tn']])) {
+        updateTextInput(session, "tn.benefit", value = query[['tn']])
+      }
+      if (!is.null(query[['fn']])) {
+        updateTextInput(session, "fn.benefit", value = query[['fn']])
+      }
+      if (!is.null(query[['fixedcost']])) {
+        updateTextInput(session, "fixed.cost", value = query[['fixedcost']])
+      }
+    })
  dt.data <- data.table()
  get.data <- reactive({
     inFile <- input$target_upload
@@ -708,11 +760,11 @@ server <- function(input, output, session) {
                         p.treated = (input$p.treated / 100),
                         p.outcome.group.a = (input$p.outcome.group.a / 100),
                         p.outcome.group.b = (input$p.outcome.group.b / 100),
-                        disc.power.group.a = input$disc.power.group.a,
-                        disc.power.group.b = input$disc.power.group.b,
+                        auc.group.a = input$auc.group.a,
+                        auc.group.b = input$auc.group.b,
                         ate.group.a = input$ate,
                         ate.group.b = input$ate,
-                        disc.power.uplift = input$disc.power.uplift,
+                        auc.uplift = input$auc.uplift,
                         corr.uplift.outcome = input$corr.uplift.outcome
                                            )
     } else {
@@ -727,7 +779,7 @@ server <- function(input, output, session) {
       paste0(paste(as_datetime(now()), "generated_data",
             input$n.obs, input$p.group.b,
             input$p.outcome.group.a, input$p.outcome.group.b,
-            input$disc.power.group.a, input$disc.power.group.b,
+            input$auc.group.a, input$auc.group.b,
             sep = "-"),
             ".csv")
     },
@@ -827,8 +879,9 @@ server <- function(input, output, session) {
         renderPlotly({ggplotly(profit.plot(get.data(),
                         tp.benefit = input$tp.benefit,
                         fp.benefit = input$fp.benefit,
-                        ## fn.benefit = input$fn.benefit,
-                        ## tn.benefit = input$tn.benefit,
+                        fn.benefit = input$fn.benefit,
+                        tn.benefit = input$tn.benefit,
+                        fixed.cost = input$fixed.cost,
                         profit.constraints = input$profit.constraints
                         ), width=800, height=500)}),
        ),
@@ -845,16 +898,18 @@ server <- function(input, output, session) {
   output$fairness.stats <- renderUI({
         DT::datatable(fairness.stats(get.data(),
                         tp.benefit = input$tp.benefit,
-                        fp.benefit = input$fp.benefit
-                        ## fn.benefit = input$fn.benefit,
-                        ## tn.benefit = input$tn.benefit
+                        fp.benefit = input$fp.benefit,
+                        fn.benefit = input$fn.benefit,
+                        tn.benefit = input$tn.benefit,
+                        fixed.cost = input$fixed.cost
 ))})
   output$roc.stats <- renderUI({
     DT::datatable(roc.stats(get.data(),
                         tp.benefit = input$tp.benefit,
-                        fp.benefit = input$fp.benefit
-                        ## fn.benefit = input$fn.benefit,
-                        ## tn.benefit = input$tn.benefit
+                        fp.benefit = input$fp.benefit,
+                        fn.benefit = input$fn.benefit,
+                        tn.benefit = input$tn.benefit,
+                        fixed.cost = input$fixed.cost
 ))})
 
 }
@@ -874,3 +929,31 @@ shinyApp(ui = ui, server = server)
 #+RESULTS:
 
 
+** Deploy
+
+#+BEGIN_SRC R :results none :tangle ./shiny/ai-business/deploy.R
+
+# Create an account on shiniapps.io to deploy your first app. This
+# procedure together will take approximately 10 minutes.
+
+# - Go to: https://www.shinyapps.io/admin/#/signup
+#
+# - Create an account (name + password). You can use whatever email
+#   you like.
+#
+# - Fill in your tokens (accountname + token + secret) in the code
+#   below
+
+
+#install.packages("shiny")
+#install.packages("rsconnect") # used to deploy
+library(shiny)
+library(data.table)
+library(rsconnect) # open libraries that you will use today
+
+setAccountInfo(name='rbelo',
+			  token='0715C91E67C11AE496AAFBB9A15FE3C4',
+			  secret='nskf8JCaiplJWBuGuH//hwxfz4GesLUQgQ7Nkc5U')
+## deployApp('shiny/fairness', account='rbelo')
+deployApp('shiny/ai-business', account='rbelo')
+#+END_SRC
