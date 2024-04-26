@@ -5,7 +5,7 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       radioGroupButtons(inputId = "typeofdata",
-                        label = "Data",
+                        label = h3("Data"),
                         choices = c("Generate Data" = "generate.data",
                                     "Load from File" = "load.data"),
                         ),
@@ -18,21 +18,21 @@ ui <- fluidPage(
       ## actionButton("generate.data.button", "Generate Data"),
      numericInput("n.obs",
                    label = "Observations",
-                   value = 1000,
+                   value = 10000,
                    min = 100,
                    max = 50000),
      fluidRow(
       column(6,
       sliderInput("p.outcome.group.a",
-                  label = "% of Positives Group A",
+                  label = "% of Positives",
                   value = c(20),
                   min = 0, max = 100)
       ),
       column(6,
-      sliderInput("disc.power.group.a",
-                  label = "Discr. Power Group A",
-                  value = c(0.5),
-                  min = 0, max = 1, step = 0.05)
+      sliderInput("auc.group.a",
+                  label = "Model Quality (AUC)",
+                  value = c(0.7),
+                  min = 0.5, max = 1, step = 0.01)
       )),
     downloadButton("downloadData", "Download Generated Data"),
      ), # conditional panel
@@ -56,6 +56,10 @@ ui <- fluidPage(
             )),
      ), # conditional panel
       hr(),
+     h3("Analysis"),
+      tabsetPanel(id = "analysis.param.tabs",
+        tabPanel(h5("Benefit/Cost"), id = "t1",
+     fluidRow(),
      h4("Benefit/ Cost Analysis"),
      switchInput(inputId = "upliftanalysis",
                  label = "Uplift Analysis",
@@ -75,15 +79,21 @@ ui <- fluidPage(
         numericInput("fp.benefit",
                 label = "False Positive",
                 value = -1))),
-     ## fluidRow(
-     ##   column(6,
-     ##     numericInput("fn.benefit",
-     ##            label = "FN",
-     ##            value = 0)),
-     ##   column(6,
-     ##    numericInput("tn.benefit",
-     ##            label = "TN",
-     ##            value = 0))),
+     fluidRow(
+       column(6,
+         numericInput("fn.benefit",
+                label = "False Negative",
+                value = 0)),
+       column(6,
+        numericInput("tn.benefit",
+                label = "True Negative",
+                value = 0))),
+     fluidRow(
+       column(6,
+         numericInput("fixed.cost",
+                label = "Fixed Cost",
+                value = 0))),
+
      ), # conditional panel
      conditionalPanel(condition = "input.upliftanalysis != ''",
      p("WARNING: Uplift Analyis is not fully implemented yet"),
@@ -122,14 +132,15 @@ ui <- fluidPage(
                   label = "Avg. Treat. Effect (ATE)",
                   value = c(0),
                   min = -1, max = 1, step = 0.1),
-      sliderInput("disc.power.uplift",
-                  label = "Discr. Power Uplift",
-                  value = c(1),
-                  min = 0, max = 1, step = 0.1),
+      sliderInput("auc.uplift",
+                  label = "AUC Uplift",
+                  value = c(0.5),
+                  min = 0.5, max = 1, step = 0.01),
       )),
      ), # conditional panel
      ), # conditional panel
-     hr(),
+        ),
+        tabPanel(h5("Fairness"), id = "t2",
      h4("Fairness Analysis"),
      switchInput(inputId = "fairnessanalysis",
                  label = "Fairness Analysis",
@@ -153,10 +164,10 @@ ui <- fluidPage(
                   min = 0, max = 100)
       ),
       column(6,
-      sliderInput("disc.power.group.b",
-                  label = "Discr. Power Group B",
-                  value = c(0.2),
-                  min = 0, max = 1, step = 0.05)
+      sliderInput("auc.group.b",
+                  label = "AUC Group B",
+                  value = c(0.6),
+                  min = 0.5, max = 1, step = 0.01)
       ))
      ), # conditional panel
       checkboxGroupInput("profit.constraints", "Fairness Constraints:",
@@ -171,7 +182,8 @@ ui <- fluidPage(
             inline = FALSE
       ),
      ), # conditional panel
-            width = 4
+        )),
+           width = 4
     ),
 
     mainPanel(

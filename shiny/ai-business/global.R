@@ -15,11 +15,11 @@ generate.data <- function(n.obs = 10000,
                           p.treated = 0.5,
                           p.outcome.group.a = 0.7,
                           p.outcome.group.b = 0.2,
-                          disc.power.group.a = 0.5,
-                          disc.power.group.b = 0.5,
+                          auc.group.a = 0.7,
+                          auc.group.b = 0.7,
                           ate.group.a = 1,
                           ate.group.b = 0,
-                          disc.power.uplift = 0.5,
+                          auc.uplift = 0.5,
                           corr.uplift.outcome = 0
                          ) {
 
@@ -59,14 +59,14 @@ generate.data <- function(n.obs = 10000,
     dt.data[outcome_control == 1 & outcome_treated == 0 , complier_status := "Do Not Disturb"]
     dt.data[outcome_control == 0 & outcome_treated == 0 , complier_status := "Lost Cause"]
 
-    dt.data[group_a == TRUE,  score := rnorm(n = .N, mean = outcome * disc.power.group.a^3 * 5)]
-    dt.data[group_a == FALSE, score := rnorm(n = .N, mean = outcome * disc.power.group.b^3 * 5)]
+    dt.data[group_a == TRUE,  score := rnorm(n = .N, mean = outcome * min(6, qnorm(auc.group.a, sd = sqrt(2))))]
+    dt.data[group_a == FALSE, score := rnorm(n = .N, mean = outcome * min(6, qnorm(auc.group.b, sd = sqrt(2))))]
     dt.data[, score := round(min_max_norm(score), 3)]
 
     dt.data[complier_status == "Sure Thing",     score_uplift := rnorm(.N, mean = 0)]
     dt.data[complier_status == "Lost Cause",     score_uplift := rnorm(.N, mean = 0)]
-    dt.data[complier_status == "Susceptible",    score_uplift := rnorm(.N, mean =   disc.power.uplift^3 * 5)]
-    dt.data[complier_status == "Do Not Disturb", score_uplift := rnorm(.N, mean = - disc.power.uplift^3 * 5)]
+    dt.data[complier_status == "Susceptible",    score_uplift := rnorm(.N, mean =   min(6, qnorm(auc.uplift, sd = sqrt(2))))]
+    dt.data[complier_status == "Do Not Disturb", score_uplift := rnorm(.N, mean = - min(6, qnorm(auc.uplift, sd = sqrt(2))))]
     dt.data[, score_uplift := round(min_max_norm(score_uplift, range=c(-1,1)), 3)]
 
     dt.data <- dt.data[order(-score)]
@@ -78,7 +78,8 @@ roc.metrics <- function(dt.data,
                         tp.benefit = 1,
                         fp.benefit = -1,
                         fn.benefit = 0,
-                        tn.benefit = 0
+                        tn.benefit = 0,
+                        fixed.cost = 0
                         ) {
     ## Calculate threshold statistics
     dt.roc <- rbind(data.table(partition = " All", dt.data[, list(outcome, score)]),
@@ -106,7 +107,7 @@ roc.metrics <- function(dt.data,
     dt.roc[, Lift := (TP / n_targeted) / (Positives / .N), by = partition]
 
     dt.roc[, Profit := TP * tp.benefit + FP * fp.benefit +
-                       FN * fn.benefit + TN * tn.benefit, by = partition]
+                       FN * fn.benefit + TN * tn.benefit - fixed.cost, by = partition]
     dt.roc[, max_profit := max(Profit), by = partition]
     dt.roc[, max_total_profit := max(Profit[partition == "A"]) + max(Profit[partition == "B"])]
     dt.roc[, max_total_profit_unaware := max_profit[partition == " All"][1]]

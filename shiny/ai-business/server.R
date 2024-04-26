@@ -3,6 +3,7 @@ roc.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -15,7 +16,8 @@ roc.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
                         )
   roc.plot.from.roc(dt.roc, profit.constraints)
 }
@@ -42,6 +44,7 @@ cum.resp.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -54,7 +57,8 @@ cum.resp.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
                         )
   cum.resp.plot.from.roc(dt.roc, profit.constraints)
 }
@@ -81,6 +85,7 @@ lift.curve.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -93,7 +98,8 @@ lift.curve.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
 )
   lift.curve.plot.from.roc(dt.roc, profit.constraints)
 }
@@ -119,6 +125,7 @@ profit.plot <- function(dt.data,
                         fp.benefit = -1,
                         fn.benefit = 0,
                         tn.benefit = 0,
+                        fixed.cost = 0,
                      profit.constraints = c("Unconstrained",
                                             "Independence (PP)",
                                             "Separation (TPR)",
@@ -131,7 +138,8 @@ profit.plot <- function(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
 )
 
   profit.plot.from.roc(dt.roc, profit.constraints)
@@ -197,13 +205,16 @@ fairness.stats <- function(dt.data,
                         tp.benefit = 1,
                         fp.benefit = -1,
                         fn.benefit = 0,
-                        tn.benefit = 0
+                        tn.benefit = 0,
+                        fixed.cost = 0
                      ) {
   dt.roc <- roc.metrics(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit)
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
+                        )
   dt.roc.merged <- fairness.metrics(dt.roc)
 
   dt.roc.merged[!is.na(optimal),
@@ -218,19 +229,47 @@ roc.stats <- function(dt.data,
                         tp.benefit = 1,
                         fp.benefit = -1,
                         fn.benefit = 0,
-                        tn.benefit = 0
+                        tn.benefit = 0,
+                        fixed.cost = 0
                      ) {
   dt.roc <- roc.metrics(dt.data,
                         tp.benefit = tp.benefit,
                         fp.benefit = fp.benefit,
                         fn.benefit = fn.benefit,
-                        tn.benefit = tn.benefit
+                        tn.benefit = tn.benefit,
+                        fixed.cost = fixed.cost
 )
   dt.roc
 }
 
 server <- function(input, output, session) {
-
+  observe({
+      query <- parseQueryString(session$clientData$url_search)
+      if (!is.null(query[['n']])) {
+        updateTextInput(session, "n.obs", value = query[['n']])
+      }
+      if (!is.null(query[['ppos']])) {
+        updateSliderInput(session, "p.outcome.group.a", value = query[['ppos']])
+      }
+      if (!is.null(query[['auc']])) {
+        updateSliderInput(session, "auc.group.a", value = query[['auc']])
+      }
+      if (!is.null(query[['tp']])) {
+        updateTextInput(session, "tp.benefit", value = query[['tp']])
+      }
+      if (!is.null(query[['fp']])) {
+        updateTextInput(session, "fp.benefit", value = query[['fp']])
+      }
+      if (!is.null(query[['tn']])) {
+        updateTextInput(session, "tn.benefit", value = query[['tn']])
+      }
+      if (!is.null(query[['fn']])) {
+        updateTextInput(session, "fn.benefit", value = query[['fn']])
+      }
+      if (!is.null(query[['fixedcost']])) {
+        updateTextInput(session, "fixed.cost", value = query[['fixedcost']])
+      }
+    })
  dt.data <- data.table()
  get.data <- reactive({
     inFile <- input$target_upload
@@ -243,11 +282,11 @@ server <- function(input, output, session) {
                         p.treated = (input$p.treated / 100),
                         p.outcome.group.a = (input$p.outcome.group.a / 100),
                         p.outcome.group.b = (input$p.outcome.group.b / 100),
-                        disc.power.group.a = input$disc.power.group.a,
-                        disc.power.group.b = input$disc.power.group.b,
+                        auc.group.a = input$auc.group.a,
+                        auc.group.b = input$auc.group.b,
                         ate.group.a = input$ate,
                         ate.group.b = input$ate,
-                        disc.power.uplift = input$disc.power.uplift,
+                        auc.uplift = input$auc.uplift,
                         corr.uplift.outcome = input$corr.uplift.outcome
                                            )
     } else {
@@ -262,7 +301,7 @@ server <- function(input, output, session) {
       paste0(paste(as_datetime(now()), "generated_data",
             input$n.obs, input$p.group.b,
             input$p.outcome.group.a, input$p.outcome.group.b,
-            input$disc.power.group.a, input$disc.power.group.b,
+            input$auc.group.a, input$auc.group.b,
             sep = "-"),
             ".csv")
     },
@@ -362,8 +401,9 @@ server <- function(input, output, session) {
         renderPlotly({ggplotly(profit.plot(get.data(),
                         tp.benefit = input$tp.benefit,
                         fp.benefit = input$fp.benefit,
-                        ## fn.benefit = input$fn.benefit,
-                        ## tn.benefit = input$tn.benefit,
+                        fn.benefit = input$fn.benefit,
+                        tn.benefit = input$tn.benefit,
+                        fixed.cost = input$fixed.cost,
                         profit.constraints = input$profit.constraints
                         ), width=800, height=500)}),
        ),
@@ -380,16 +420,18 @@ server <- function(input, output, session) {
   output$fairness.stats <- renderUI({
         DT::datatable(fairness.stats(get.data(),
                         tp.benefit = input$tp.benefit,
-                        fp.benefit = input$fp.benefit
-                        ## fn.benefit = input$fn.benefit,
-                        ## tn.benefit = input$tn.benefit
+                        fp.benefit = input$fp.benefit,
+                        fn.benefit = input$fn.benefit,
+                        tn.benefit = input$tn.benefit,
+                        fixed.cost = input$fixed.cost
 ))})
   output$roc.stats <- renderUI({
     DT::datatable(roc.stats(get.data(),
                         tp.benefit = input$tp.benefit,
-                        fp.benefit = input$fp.benefit
-                        ## fn.benefit = input$fn.benefit,
-                        ## tn.benefit = input$tn.benefit
+                        fp.benefit = input$fp.benefit,
+                        fn.benefit = input$fn.benefit,
+                        tn.benefit = input$tn.benefit,
+                        fixed.cost = input$fixed.cost
 ))})
 
 }
